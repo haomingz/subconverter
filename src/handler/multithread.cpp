@@ -1,63 +1,61 @@
 #include <future>
 #include <thread>
+
+#include "../handler/settings.h"
+#include "../utils/network.h"
 #include "webget.h"
 #include "multithread.h"
 //#include "vfs.h"
 
-#include "../utils/network.h"
-
 //safety lock for multi-thread
 std::mutex on_emoji, on_rename, on_stream, on_time;
 
-extern string_array gEmojis, gRenames;
-extern string_array gStreamNodeRules, gTimeNodeRules;
-
-string_array safe_get_emojis()
+RegexMatchConfigs safe_get_emojis()
 {
     guarded_mutex guard(on_emoji);
-    return gEmojis;
+    return global.emojis;
 }
 
-string_array safe_get_renames()
+RegexMatchConfigs safe_get_renames()
 {
     guarded_mutex guard(on_rename);
-    return gRenames;
+    return global.renames;
 }
 
-string_array safe_get_streams()
+RegexMatchConfigs safe_get_streams()
 {
     guarded_mutex guard(on_stream);
-    return gStreamNodeRules;
+    return global.streamNodeRules;
 }
 
-string_array safe_get_times()
+RegexMatchConfigs safe_get_times()
 {
     guarded_mutex guard(on_time);
-    return gTimeNodeRules;
+    return global.timeNodeRules;
 }
 
-void safe_set_emojis(string_array &data)
+void safe_set_emojis(RegexMatchConfigs data)
 {
     guarded_mutex guard(on_emoji);
-    gEmojis.swap(data);
+    global.emojis.swap(data);
 }
 
-void safe_set_renames(string_array &data)
+void safe_set_renames(RegexMatchConfigs data)
 {
     guarded_mutex guard(on_rename);
-    gRenames.swap(data);
+    global.renames.swap(data);
 }
 
-void safe_set_streams(string_array &data)
+void safe_set_streams(RegexMatchConfigs data)
 {
     guarded_mutex guard(on_stream);
-    gStreamNodeRules.swap(data);
+    global.streamNodeRules.swap(data);
 }
 
-void safe_set_times(string_array &data)
+void safe_set_times(RegexMatchConfigs data)
 {
     guarded_mutex guard(on_time);
-    gTimeNodeRules.swap(data);
+    global.timeNodeRules.swap(data);
 }
 
 std::shared_future<std::string> fetchFileAsync(const std::string &path, const std::string &proxy, int cache_ttl, bool async)

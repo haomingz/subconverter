@@ -44,6 +44,7 @@ ADD_EXECUTABLE(subconverter
     src/handler/multithread.cpp
     src/handler/upload.cpp
     src/handler/webget.cpp
+    src/handler/settings.cpp
     src/main.cpp
     src/parser/infoparser.cpp
     src/parser/subparser.cpp
@@ -84,6 +85,9 @@ ADD_DEFINITIONS(-DCURL_STATICLIB)
 
 FIND_PACKAGE(Rapidjson REQUIRED)
 INCLUDE_DIRECTORIES(${RAPIDJSON_INCLUDE_DIRS})
+
+FIND_PACKAGE(toml11 REQUIRED)
+INCLUDE_DIRECTORIES(${TOML11_INCLUDE_DIRS})
 
 PKG_CHECK_MODULES(YAML_CPP yaml-cpp>=0.6.3 REQUIRED)
 FIND_LIBRARY(YAML_CPP_LIBRARY NAMES yaml-cpp yaml-cppd PATHS ${YAML_CPP_LIBRARY_DIRS})

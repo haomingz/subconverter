@@ -9,13 +9,11 @@
 
 #include "../handler/multithread.h"
 #include "../handler/webget.h"
+#include "../handler/settings.h"
 #include "../parser/config/proxy.h"
 #include "../utils/map_extra.h"
 #include "../utils/system.h"
 #include "script_quickjs.h"
-
-extern int gCacheConfig;
-extern std::string gProxyConfig;
 
 std::string parseProxy(const std::string &source);
 
@@ -227,7 +225,7 @@ public:
     qjs_fetch_Headers headers;
     std::string cookies;
     std::string postdata;
-    qjs_fetch_Request(const std::string &url) : url(url) {}
+    explicit qjs_fetch_Request(const std::string &url) : url(url) {}
 };
 
 class qjs_fetch_Response
@@ -370,7 +368,7 @@ static qjs_fetch_Response qjs_fetch(qjs_fetch_Request request)
     }
 
     std::string response_headers;
-    FetchArgument argument {method, request.url, request.proxy, request.postdata, &request.headers.headers, &request.cookies, 0};
+    FetchArgument argument {method, request.url, request.proxy, &request.postdata, &request.headers.headers, &request.cookies, 0};
     FetchResult result {&response.status_code, &response.content, &response_headers, &response.cookies};
 
     webGet(argument, result);
@@ -381,7 +379,7 @@ static qjs_fetch_Response qjs_fetch(qjs_fetch_Request request)
 
 std::string getGeoIP(const std::string &address, const std::string &proxy)
 {
-    return fetchFile("https://api.ip.sb/geoip/" + address, parseProxy(proxy), gCacheConfig);
+    return fetchFile("https://api.ip.sb/geoip/" + address, parseProxy(proxy), global.cacheConfig);
 }
 
 void script_runtime_init(qjs::Runtime &runtime)
@@ -390,14 +388,12 @@ void script_runtime_init(qjs::Runtime &runtime)
     JS_SetModuleLoaderFunc(runtime.rt, nullptr, js_module_loader, nullptr);
 }
 
-int ShowMsgbox(std::string title, std::string content, uint16_t type = 0)
+int ShowMsgbox(const std::string &title, std::string content, uint16_t type = 0)
 {
 #ifdef _WIN32
     if(!type)
         type = MB_ICONINFORMATION;
-    title = utf8ToACP(title);
-    content = utf8ToACP(content);
-    return MessageBoxA(NULL, content.c_str(), title.c_str(), type);
+    return MessageBoxA(NULL, utf8ToACP(content).c_str(), utf8ToACP(title).c_str(), type);
 #else
     return -1;
 #endif // _WIN32

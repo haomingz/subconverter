@@ -7,6 +7,7 @@
 
 #include <curl/curl.h>
 
+#include "../handler/settings.h"
 #include "../utils/base64/base64.h"
 #include "../utils/defer.h"
 #include "../utils/file_extra.h"
@@ -20,9 +21,6 @@
 #define _stat stat
 #endif // _stat
 #endif // _WIN32
-
-extern bool gPrintDbgInfo, gServeCacheOnFetchFail;
-extern int gLogLevel;
 
 /*
 using guarded_mutex = std::lock_guard<std::mutex>;
@@ -98,7 +96,7 @@ RWLock cache_rw_lock;
 long gMaxAllowedDownloadSize = 1048576L;
 
 //std::string user_agent_str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.169 Safari/537.36";
-std::string user_agent_str = "subconverter/" VERSION " cURL/" LIBCURL_VERSION;
+static std::string user_agent_str = "subconverter/" VERSION " cURL/" LIBCURL_VERSION;
 
 struct curl_progress_data
 {
@@ -150,7 +148,7 @@ static int size_checker(void *clientp, curl_off_t dltotal, curl_off_t dlnow, cur
 static inline void curl_set_common_options(CURL *curl_handle, const char *url, curl_progress_data *data)
 {
     curl_easy_setopt(curl_handle, CURLOPT_URL, url);
-    curl_easy_setopt(curl_handle, CURLOPT_VERBOSE, gLogLevel == LOG_LEVEL_VERBOSE ? 1L : 0L);
+    curl_easy_setopt(curl_handle, CURLOPT_VERBOSE, global.logLevel == LOG_LEVEL_VERBOSE ? 1L : 0L);
     curl_easy_setopt(curl_handle, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl_handle, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl_handle, CURLOPT_FOLLOWLOCATION, 1L);
@@ -231,13 +229,19 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
     {
     case HTTP_POST:
         curl_easy_setopt(curl_handle, CURLOPT_POST, 1L);
-        curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, argument.post_data.data());
-        curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDSIZE, argument.post_data.size());
+        if(argument.post_data)
+        {
+            curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, argument.post_data->data());
+            curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDSIZE, argument.post_data->size());
+        }
         break;
     case HTTP_PATCH:
         curl_easy_setopt(curl_handle, CURLOPT_CUSTOMREQUEST, "PATCH");
-        curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, argument.post_data.data());
-        curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDSIZE, argument.post_data.size());
+        if(argument.post_data)
+        {
+            curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, argument.post_data->data());
+            curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDSIZE, argument.post_data->size());
+        }
         break;
     case HTTP_HEAD:
         curl_easy_setopt(curl_handle, CURLOPT_NOBODY, 1L);
@@ -249,14 +253,16 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
     unsigned int fail_count = 0, max_fails = 1;
     while(true)
     {
-        *result.status_code = curl_easy_perform(curl_handle);
-        if(*result.status_code == CURLE_OK || max_fails >= fail_count)
+        retVal = curl_easy_perform(curl_handle);
+        if(retVal == CURLE_OK || max_fails >= fail_count)
             break;
         else
             fail_count++;
     }
 
-    curl_easy_getinfo(curl_handle, CURLINFO_HTTP_CODE, &retVal);
+    long code = 0;
+    curl_easy_getinfo(curl_handle, CURLINFO_HTTP_CODE, &code);
+    *result.status_code = code;
 
     if(result.cookies)
     {
@@ -277,9 +283,9 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
 
     curl_easy_cleanup(curl_handle);
 
-    if(data)
+    if(data && !argument.keep_resp_on_fail)
     {
-        if(*result.status_code != CURLE_OK || retVal != 200)
+        if(retVal != CURLE_OK || *result.status_code != 200)
             data->clear();
         data->shrink_to_fit();
     }
@@ -316,7 +322,7 @@ std::string webGet(const std::string &url, const std::string &proxy, unsigned in
     int return_code = 0;
     std::string content;
 
-    FetchArgument argument {HTTP_GET, url, proxy, "", request_headers, nullptr, cache_ttl};
+    FetchArgument argument {HTTP_GET, url, proxy, nullptr, request_headers, nullptr, cache_ttl};
     FetchResult fetch_res {&return_code, &content, response_headers, nullptr};
 
     if (startsWith(url, "data:"))
@@ -347,7 +353,7 @@ std::string webGet(const std::string &url, const std::string &proxy, unsigned in
             writeLog(0, "CACHE NOT EXIST: '" + url + "', creating new cache.");
         //content = curlGet(url, proxy, response_headers, return_code); // try to fetch data
         curlGet(argument, fetch_res);
-        if(return_code == CURLE_OK) // success, save new cache
+        if(return_code == 200) // success, save new cache
         {
             //guarded_mutex guard(cache_rw_lock);
             cache_rw_lock.writeLock();
@@ -358,7 +364,7 @@ std::string webGet(const std::string &url, const std::string &proxy, unsigned in
         }
         else
         {
-            if(fileExist(path) && gServeCacheOnFetchFail) // failed, check if cache exist
+            if(fileExist(path) && global.serveCacheOnFetchFail) // failed, check if cache exist
             {
                 writeLog(0, "Fetch failed. Serving cached content."); // cache exist, serving cache
                 //guarded_mutex guard(cache_rw_lock);
@@ -386,138 +392,29 @@ void flushCache()
     operateFiles("cache", [](const std::string &file){ remove(("cache/" + file).data()); return 0; });
 }
 
-int curlPost(const std::string &url, const std::string &data, const std::string &proxy, const string_array &request_headers, std::string *retData)
-{
-    CURL *curl_handle;
-    CURLcode res;
-    struct curl_slist *list = NULL;
-    long retVal = 0;
-
-    curl_init();
-    curl_handle = curl_easy_init();
-    list = curl_slist_append(list, "Content-Type: application/json;charset='utf-8'");
-    for(const std::string &x : request_headers)
-        list = curl_slist_append(list, x.data());
-
-    curl_progress_data limit;
-    curl_set_common_options(curl_handle, url.data(), &limit);
-    curl_easy_setopt(curl_handle, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, data.data());
-    curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDSIZE, data.size());
-    curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, writer);
-    curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, retData);
-    curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, list);
-    if(proxy.size())
-        curl_easy_setopt(curl_handle, CURLOPT_PROXY, proxy.data());
-
-    res = curl_easy_perform(curl_handle);
-    curl_slist_free_all(list);
-
-    if(res == CURLE_OK)
-    {
-        curl_easy_getinfo(curl_handle, CURLINFO_HTTP_CODE, &retVal);
-    }
-
-    curl_easy_cleanup(curl_handle);
-
-    return retVal;
-}
-
 int webPost(const std::string &url, const std::string &data, const std::string &proxy, const string_icase_map &request_headers, std::string *retData)
 {
     //return curlPost(url, data, proxy, request_headers, retData);
     int return_code = 0;
-    FetchArgument argument {HTTP_POST, url, proxy, "", &request_headers, nullptr, 0};
+    FetchArgument argument {HTTP_POST, url, proxy, &data, &request_headers, nullptr, 0, true};
     FetchResult fetch_res {&return_code, retData, nullptr, nullptr};
     return webGet(argument, fetch_res);
-}
-
-int curlPatch(const std::string &url, const std::string &data, const std::string &proxy, const string_array &request_headers, std::string *retData)
-{
-    CURL *curl_handle;
-    CURLcode res;
-    long retVal = 0;
-    struct curl_slist *list = NULL;
-
-    curl_init();
-
-    curl_handle = curl_easy_init();
-
-    list = curl_slist_append(list, "Content-Type: application/json;charset='utf-8'");
-    for(const std::string &x : request_headers)
-        list = curl_slist_append(list, x.data());
-
-    curl_progress_data limit;
-    curl_set_common_options(curl_handle, url.data(), &limit);
-    curl_easy_setopt(curl_handle, CURLOPT_CUSTOMREQUEST, "PATCH");
-    curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, data.data());
-    curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDSIZE, data.size());
-    curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, writer);
-    curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, retData);
-    curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, list);
-    if(proxy.size())
-        curl_easy_setopt(curl_handle, CURLOPT_PROXY, proxy.data());
-
-    res = curl_easy_perform(curl_handle);
-    curl_slist_free_all(list);
-    if(res == CURLE_OK)
-    {
-        res = curl_easy_getinfo(curl_handle, CURLINFO_HTTP_CODE, &retVal);
-    }
-
-    curl_easy_cleanup(curl_handle);
-
-    return retVal;
 }
 
 int webPatch(const std::string &url, const std::string &data, const std::string &proxy, const string_icase_map &request_headers, std::string *retData)
 {
     //return curlPatch(url, data, proxy, request_headers, retData);
     int return_code = 0;
-    FetchArgument argument {HTTP_PATCH, url, proxy, "", &request_headers, nullptr, 0};
+    FetchArgument argument {HTTP_PATCH, url, proxy, &data, &request_headers, nullptr, 0, true};
     FetchResult fetch_res {&return_code, retData, nullptr, nullptr};
     return webGet(argument, fetch_res);
-}
-
-int curlHead(const std::string &url, const std::string &proxy, const string_array &request_headers, std::string &response_headers)
-{
-    CURL *curl_handle;
-    CURLcode res;
-    long retVal = 0;
-    struct curl_slist *list = NULL;
-
-    curl_init();
-
-    curl_handle = curl_easy_init();
-
-    list = curl_slist_append(list, "Content-Type: application/json;charset='utf-8'");
-    for(const std::string &x : request_headers)
-        list = curl_slist_append(list, x.data());
-
-    curl_progress_data limit;
-    curl_set_common_options(curl_handle, url.data(), &limit);
-    curl_easy_setopt(curl_handle, CURLOPT_HEADERFUNCTION, writer);
-    curl_easy_setopt(curl_handle, CURLOPT_HEADERDATA, &response_headers);
-    curl_easy_setopt(curl_handle, CURLOPT_NOBODY, 1L);
-    curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, list);
-    if(proxy.size())
-        curl_easy_setopt(curl_handle, CURLOPT_PROXY, proxy.data());
-
-    res = curl_easy_perform(curl_handle);
-    curl_slist_free_all(list);
-    if(res == CURLE_OK)
-        res = curl_easy_getinfo(curl_handle, CURLINFO_HTTP_CODE, &retVal);
-
-    curl_easy_cleanup(curl_handle);
-
-    return retVal;
 }
 
 int webHead(const std::string &url, const std::string &proxy, const string_icase_map &request_headers, std::string &response_headers)
 {
     //return curlHead(url, proxy, request_headers, response_headers);
     int return_code = 0;
-    FetchArgument argument {HTTP_HEAD, url, proxy, "", &request_headers, nullptr, 0};
+    FetchArgument argument {HTTP_HEAD, url, proxy, nullptr, &request_headers, nullptr, 0};
     FetchResult fetch_res {&return_code, nullptr, &response_headers, nullptr};
     return webGet(argument, fetch_res);
 }
@@ -533,39 +430,4 @@ string_array headers_map_to_array(const string_map &headers)
 int webGet(const FetchArgument& argument, FetchResult &result)
 {
     return curlGet(argument, result);
-    /*
-    switch(argument.method)
-    {
-    case HTTP_GET:
-        return curlGet(argument, result);
-    case HTTP_POST:
-        {
-            string_array request_header;
-            if(argument.request_headers != nullptr)
-                request_header = headers_map_to_array(*argument.request_headers);
-            int res = curlPost(argument.url, argument.post_data, argument.proxy, request_header, result.content);
-            *result.status_code = res;
-            return res;
-        }
-    case HTTP_PATCH:
-        {
-            string_array request_header;
-            if(argument.request_headers != nullptr)
-                request_header = headers_map_to_array(*argument.request_headers);
-            int res = curlPatch(argument.url, argument.post_data, argument.proxy, request_header, result.content);
-            *result.status_code = res;
-            return res;
-        }
-    case HTTP_HEAD:
-        {
-            string_array request_header;
-            if(argument.request_headers != nullptr)
-                request_header = headers_map_to_array(*argument.request_headers);
-            int res = curlHead(argument.url, argument.proxy, request_header, *result.response_headers);
-            *result.status_code = res;
-            return res;
-        }
-    }
-    return -1;
-    */
 }
