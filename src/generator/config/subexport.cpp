@@ -3,10 +3,6 @@
 #include <numeric>
 #include <cmath>
 #include <climits>
-#include <rapidjson/writer.h>
-#include <rapidjson/document.h>
-#include <rapidjson/error/en.h>
-#include <yaml-cpp/yaml.h>
 
 #include "../../config/regmatch.h"
 #include "../../generator/config/subexport.h"
@@ -80,10 +76,6 @@ bool matchRange(const std::string &range, int target)
         }
         else if(regMatch(x, reg_range))
         {
-            /*
-            range_begin = to_int(regReplace(x, reg_range, "$1"), INT_MAX);
-            range_end = to_int(regReplace(x, reg_range, "$2"), INT_MIN);
-            */
             regGetMatch(x, reg_range, 3, 0, &range_begin_str, &range_end_str);
             range_begin = to_int(range_begin_str, INT_MAX);
             range_end = to_int(range_end_str, INT_MIN);
@@ -92,15 +84,13 @@ bool matchRange(const std::string &range, int target)
         }
         else if(regMatch(x, reg_not))
         {
+            match = true;
             if(to_int(regReplace(x, reg_not, "$1"), INT_MAX) == target)
                 match = false;
         }
         else if(regMatch(x, reg_not_range))
         {
-            /*
-            range_begin = to_int(regReplace(x, reg_range, "$1"), INT_MAX);
-            range_end = to_int(regReplace(x, reg_range, "$2"), INT_MIN);
-            */
+            match = true;
             regGetMatch(x, reg_range, 3, 0, &range_begin_str, &range_end_str);
             range_begin = to_int(range_begin_str, INT_MAX);
             range_end = to_int(range_end_str, INT_MIN);
@@ -295,29 +285,35 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
         case ProxyType::VMess:
             singleproxy["type"] = "vmess";
             singleproxy["uuid"] = x.UserId;
-            singleproxy["alterId"] = static_cast<uint32_t>(x.AlterId);
+            singleproxy["alterId"] = x.AlterId;
             singleproxy["cipher"] = x.EncryptMethod;
             singleproxy["tls"] = x.TLSSecure;
             if(!scv.is_undef())
                 singleproxy["skip-cert-verify"] = scv.get();
+            if(!x.ServerName.empty())
+                singleproxy["servername"] = x.ServerName;
             switch(hash_(x.TransferProtocol))
             {
             case "tcp"_hash:
                 break;
             case "ws"_hash:
                 singleproxy["network"] = x.TransferProtocol;
-                /*
-                singleproxy["ws-opts"]["path"] = x.Path;
-                if(!x.Host.empty())
-                    singleproxy["ws-opts"]["headers"]["Host"] = x.Host;
-                if(!x.Edge.empty())
-                    singleproxy["ws-opts"]["headers"]["Edge"] = x.Edge;
-                */
-                singleproxy["ws-path"] = x.Path;
-                if(!x.Host.empty())
-                    singleproxy["ws-headers"]["Host"] = x.Host;
-                if(!x.Edge.empty())
-                    singleproxy["ws-headers"]["Edge"] = x.Edge;
+                if(ext.clash_new_field_name)
+                {
+                    singleproxy["ws-opts"]["path"] = x.Path;
+                    if(!x.Host.empty())
+                        singleproxy["ws-opts"]["headers"]["Host"] = x.Host;
+                    if(!x.Edge.empty())
+                        singleproxy["ws-opts"]["headers"]["Edge"] = x.Edge;
+                }
+                else
+                {
+                    singleproxy["ws-path"] = x.Path;
+                    if(!x.Host.empty())
+                        singleproxy["ws-headers"]["Host"] = x.Host;
+                    if(!x.Edge.empty())
+                        singleproxy["ws-headers"]["Edge"] = x.Edge;
+                }
                 break;
             case "http"_hash:
                 singleproxy["network"] = x.TransferProtocol;
@@ -387,6 +383,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
                 singleproxy["skip-cert-verify"] = scv.get();
             break;
         case ProxyType::HTTP:
+        case ProxyType::HTTPS:
             singleproxy["type"] = "http";
             if(!x.Username.empty())
                 singleproxy["username"] = x.Username;
@@ -396,7 +393,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
                 if(std::all_of(x.Password.begin(), x.Password.end(), ::isdigit))
                     singleproxy["password"].SetTag("str");
             }
-            singleproxy["tls"] = type == "HTTPS";
+            singleproxy["tls"] = x.TLSSecure;
             if(!scv.is_undef())
                 singleproxy["skip-cert-verify"] = scv.get();
             break;
@@ -419,6 +416,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
                     singleproxy["grpc-opts"]["grpc-service-name"] = x.Path;
                 break;
             case "ws"_hash:
+                singleproxy["network"] = x.TransferProtocol;
                 singleproxy["ws-opts"]["path"] = x.Path;
                 if(!x.Host.empty())
                     singleproxy["ws-opts"]["headers"]["Host"] = x.Host;
@@ -428,6 +426,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
         case ProxyType::Snell:
             singleproxy["type"] = "snell";
             singleproxy["psk"] = x.Password;
+            if(x.SnellVersion != 0)
+                singleproxy["version"] = x.SnellVersion;
             if(!x.OBFS.empty())
             {
                 singleproxy["obfs-opts"]["mode"] = x.OBFS;
@@ -669,7 +669,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
         case ProxyType::VMess:
             if(surge_ver < 4 && surge_ver != -3)
                 continue;
-            proxy = "vmess, " + hostname + ", " + port + ", username=" + id + ", tls=" + (tlssecure ? "true" : "false");
+            proxy = "vmess, " + hostname + ", " + port + ", username=" + id + ", tls=" + (tlssecure ? "true" : "false") +  ", vmess-aead=" + (x.AlterId == 0 ? "true" : "false");
             if(tlssecure && !tls13.is_undef())
                 proxy += ", tls13=" + std::string(tls13 ? "true" : "false");
             switch(hash_(transproto))
@@ -720,6 +720,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
                 proxy += ", skip-cert-verify=" + scv.get_str();
             break;
         case ProxyType::HTTP:
+        case ProxyType::HTTPS:
             proxy = "http, " + hostname + ", " + port;
             if(!username.empty())
                 proxy += ", username=" + username;
@@ -733,6 +734,8 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
             if(surge_ver < 4)
                 continue;
             proxy = "trojan, " + hostname + ", " + port + ", password=" + password;
+            if(x.SnellVersion != 0)
+                proxy += ", version=" + std::to_string(x.SnellVersion);
             if(!host.empty())
                 proxy += ", sni=" + host;
             if(!scv.is_undef())
@@ -835,7 +838,6 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
 std::string proxyToSingle(std::vector<Proxy> &nodes, int types, extra_settings &ext)
 {
     /// types: SS=1 SSR=2 VMess=4 Trojan=8
-    rapidjson::Document json;
     std::string remark, hostname, port, password, method;
     std::string plugin, pluginopts;
     std::string protocol, protoparam, obfs, obfsparam;
@@ -865,7 +867,7 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, int types, extra_settings &
             }
             else if(ssr)
             {
-                if(std::count(ssr_ciphers.begin(), ssr_ciphers.end(), method) > 0 && GetMember(json, "Plugin").empty() && GetMember(json, "Plugin").empty())
+                if(std::find(ssr_ciphers.begin(), ssr_ciphers.end(), method) != ssr_ciphers.end() && plugin.empty())
                     proxyStr = "ssr://" + urlSafeBase64Encode(hostname + ":" + port + ":origin:" + method + ":plain:" + urlSafeBase64Encode(password) \
                                + "/?group=" + urlSafeBase64Encode(x.Group) + "&remarks=" + urlSafeBase64Encode(remark));
             }
@@ -881,7 +883,7 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, int types, extra_settings &
             }
             else if(ss)
             {
-                if(std::count(ss_ciphers.begin(), ss_ciphers.end(), method) > 0 && protocol == "origin" && obfs == "plain")
+                if(std::find(ss_ciphers.begin(), ss_ciphers.end(), method) != ss_ciphers.end() && protocol == "origin" && obfs == "plain")
                     proxyStr = "ss://" + urlSafeBase64Encode(method + ":" + password) + "@" + hostname + ":" + port + "#" + urlEncode(remark);
             }
             else
@@ -898,6 +900,12 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, int types, extra_settings &
             proxyStr = "trojan://" + password + "@" + hostname + ":" + port + "?allowInsecure=" + (x.AllowInsecure.get() ? "1" : "0");
             if(!host.empty())
                 proxyStr += "&sni=" + host;
+            if(transproto == "ws")
+            {
+                proxyStr += "&ws=1";
+                if(!path.empty())
+                    proxyStr += "&wspath=" + urlEncode(path);
+            }
             proxyStr += "#" + urlEncode(remark);
             break;
         default:
@@ -1096,6 +1104,7 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini, std::vector<RulesetC
             }
             break;
         case ProxyType::HTTP:
+        case ProxyType::HTTPS:
             proxyStr = remark + " = http, upstream-proxy-address=" + hostname + ", upstream-proxy-port=" + port + ", group=" + x.Group;
             if(!username.empty() && !password.empty())
                 proxyStr += ", upstream-proxy-auth=true, upstream-proxy-username=" + username + ", upstream-proxy-password=" + password;
@@ -1282,7 +1291,7 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
         case ProxyType::VMess:
             if(method == "auto")
                 method = "chacha20-ietf-poly1305";
-            proxyStr = "vmess = " + hostname + ":" + port + ", method=" + method + ", password=" + id;
+            proxyStr = "vmess = " + hostname + ":" + port + ", method=" + method + ", password=" + id + ", aead=" + (x.AlterId == 0 ? "true" : "false");
             if(tlssecure && !tls13.is_undef())
                 proxyStr += ", tls13=" + std::string(tls13 ? "true" : "false");
             if(transproto == "ws")
@@ -1339,6 +1348,7 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
                 proxyStr += ", obfs-host=" + obfsparam;
             break;
         case ProxyType::HTTP:
+        case ProxyType::HTTPS:
             proxyStr = "http = " + hostname + ":" + port + ", username=" + (username.empty() ? "none" : username) + ", password=" + (password.empty() ? "none" : password);
             if(tlssecure)
             {
@@ -1394,6 +1404,8 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
             type = "static";
             break;
         case ProxyGroupType::URLTest:
+            type = "url-latency-benchmark";
+            break;
         case ProxyGroupType::Fallback:
             type = "available";
             break;

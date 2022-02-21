@@ -65,7 +65,7 @@ struct Proxy
     String OBFS;
     String OBFSParam;
     String UserId;
-    uint8_t AlterId = 0;
+    uint16_t AlterId = 0;
     String TransferProtocol;
     String FakeType;
     bool TLSSecure = false;
@@ -81,6 +81,9 @@ struct Proxy
     tribool TCPFastOpen;
     tribool AllowInsecure;
     tribool TLS13;
+
+    uint16_t SnellVersion = 0;
+    String ServerName;
 };
 
 #define SS_DEFAULT_GROUP "SSProvider"
