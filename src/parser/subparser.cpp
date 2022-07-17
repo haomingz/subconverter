@@ -120,14 +120,15 @@ void explodeVmess(std::string vmess, Proxy &node)
     std::string version, ps, add, port, type, id, aid, net, path, host, tls, sni;
     Document jsondata;
     std::vector<std::string> vArray;
-    if(regMatch(vmess, "vmess://(.*?)@(.*)"))
-    {
-        explodeStdVMess(vmess, node);
-        return;
-    }
-    else if(regMatch(vmess, "vmess://(.*?)\\?(.*)")) //shadowrocket style link
+
+    if(regMatch(vmess, "vmess://([A-Za-z0-9-_]+)\\?(.*)")) //shadowrocket style link
     {
         explodeShadowrocket(vmess, node);
+        return;
+    }
+    else if(regMatch(vmess, "vmess://(.*?)@(.*)"))
+    {
+        explodeStdVMess(vmess, node);
         return;
     }
     else if(regMatch(vmess, "vmess1://(.*?)\\?(.*)")) //kitsunebi style link
@@ -746,7 +747,9 @@ void explodeTrojan(std::string trojan, Proxy &node)
     if(port == "0")
         return;
 
-    host = getUrlArg(addition, "peer");
+    host = getUrlArg(addition, "sni");
+    if(host.empty())
+        host = getUrlArg(addition, "peer");
     tfo = getUrlArg(addition, "tfo");
     scv = getUrlArg(addition, "allowInsecure");
     group = urlDecode(getUrlArg(addition, "group"));

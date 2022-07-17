@@ -342,7 +342,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     std::string argGroupName = urlDecode(getUrlArg(argument, "group")), argUploadPath = getUrlArg(argument, "upload_path");
     std::string argIncludeRemark = urlDecode(getUrlArg(argument, "include")), argExcludeRemark = urlDecode(getUrlArg(argument, "exclude"));
     std::string argCustomGroups = urlSafeBase64Decode(getUrlArg(argument, "groups")), argCustomRulesets = urlSafeBase64Decode(getUrlArg(argument, "ruleset")), argExternalConfig = urlDecode(getUrlArg(argument, "config"));
-    std::string argDeviceID = getUrlArg(argument, "dev_id"), argFilename = getUrlArg(argument, "filename"), argUpdateInterval = getUrlArg(argument, "interval"), argUpdateStrict = getUrlArg(argument, "strict");
+    std::string argDeviceID = getUrlArg(argument, "dev_id"), argFilename = urlDecode(getUrlArg(argument, "filename")), argUpdateInterval = getUrlArg(argument, "interval"), argUpdateStrict = getUrlArg(argument, "strict");
     std::string argRenames = urlDecode(getUrlArg(argument, "rename")), argFilterScript = urlDecode(getUrlArg(argument, "filter_script"));
 
     /// switches with default value
@@ -407,6 +407,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     std::string proxy = parseProxy(global.proxySubscription);
 
     /// check other flags
+    ext.authorized = authorized;
     ext.append_proxy_type = argAppendType.get(global.appendType);
     if((argTarget == "clash" || argTarget == "clashr") && argGenClashScript.is_undef())
         argExpandRulesets.define(true);
@@ -612,6 +613,12 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
         *status_code = 400;
         return "No nodes were found!";
     }
+    if(subInfo.size() && argAppendUserinfo.get(global.appendUserinfo))
+        response.headers.emplace("Subscription-UserInfo", subInfo);
+
+    if(request.method == "HEAD")
+        return "";
+
     argPrependInsert.define(global.prependInsert);
     if(argPrependInsert)
     {
@@ -672,9 +679,6 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     if(argGroupName.size())
         for(Proxy &x : nodes)
             x.Group = argGroupName;
-
-    if(subInfo.size() && argAppendUserinfo.get(global.appendUserinfo))
-        response.headers.emplace("Subscription-UserInfo", subInfo);
 
     //do pre-process now
     preprocessNodes(nodes, ext);
@@ -886,7 +890,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     }
     writeLog(0, "Generate completed.", LOG_LEVEL_INFO);
     if(argFilename.size())
-        response.headers.emplace("Content-Disposition", "attachment; filename=\"" + argFilename + "\"");
+        response.headers.emplace("Content-Disposition", "attachment; filename=\"" + argFilename + "\"; filename*=utf-8''" + urlEncode(argFilename));
     return output_content;
 }
 
