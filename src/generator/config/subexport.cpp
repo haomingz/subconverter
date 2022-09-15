@@ -580,6 +580,8 @@ std::string proxyToClash(std::vector<Proxy> &nodes, const std::string &base_conf
 
     std::string output_content = rulesetToClashStr(yamlnode, ruleset_content_array, ext.overwrite_original_rules, ext.clash_new_field_name);
     output_content.insert(0, YAML::Dump(yamlnode));
+    //rulesetToClash(yamlnode, ruleset_content_array, ext.overwrite_original_rules, ext.clash_new_field_name);
+    //std::string output_content = YAML::Dump(yamlnode);
 
     return output_content;
 }
@@ -677,7 +679,10 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
             case "tcp"_hash:
                 break;
             case "ws"_hash:
-                proxy += ", ws=true, ws-path=" + path + ", sni=" + host + ", ws-headers=Host:" + host;
+                if(host.empty())
+                    proxy += ", ws=true, ws-path=" + path + ", sni=" + hostname;
+                else
+                    proxy += ", ws=true, ws-path=" + path + ", sni=" + hostname + ", ws-headers=Host:" + host;
                 if(!edge.empty())
                     proxy += "|Edge:" + edge;
                 break;
@@ -790,9 +795,9 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
         case ProxyGroupType::Fallback:
             break;
         case ProxyGroupType::LoadBalance:
-            if(surge_ver < 1)
+            if(surge_ver < 1 && surge_ver != -3)
                 continue;
-            [[fallthrough]];
+            break;
         case ProxyGroupType::SSID:
             proxy = x.TypeStr() + ",default=" + x.Proxies[0] + ",";
             proxy += join(x.Proxies.begin() + 1, x.Proxies.end(), ",");
@@ -823,16 +828,18 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
 
         proxy = x.TypeStr() + ",";
         proxy += join(filtered_nodelist, ",");
-        if(x.Type == ProxyGroupType::URLTest || x.Type == ProxyGroupType::Fallback)
+        if(x.Type == ProxyGroupType::URLTest || x.Type == ProxyGroupType::Fallback || x.Type == ProxyGroupType::LoadBalance)
         {
             proxy += ",url=" + x.Url + ",interval=" + std::to_string(x.Interval);
             if(x.Tolerance > 0)
                 proxy += ",tolerance=" + std::to_string(x.Tolerance);
             if(x.Timeout > 0)
                 proxy += ",timeout=" + std::to_string(x.Timeout);
+            if(!x.Persistent.is_undef())
+                proxy += ",persistent=" + x.Persistent.get_str();
+            if(!x.EvaluateBeforeUse.is_undef())
+                proxy += ",evaluate-before-use=" + x.EvaluateBeforeUse.get_str();
         }
-        else if(x.Type == ProxyGroupType::LoadBalance)
-            proxy += ",url=" + x.Url;
 
         ini.Set("{NONAME}", x.Name + " = " + proxy); //insert order
     }
@@ -1382,6 +1389,23 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
                 proxyStr += ", over-tls=false";
             }
             break;
+        case ProxyType::SOCKS5:
+            proxyStr = "socks5 = " + hostname + ":" + port;
+            if(!username.empty() && !password.empty())
+            {
+                proxyStr += ", username=" + username + ", password=" + password;
+                if(tlssecure)
+                {
+                    proxyStr += ", over-tls=true, tls-host=" + host;
+                    if(!tls13.is_undef())
+                        proxyStr += ", tls13=" + std::string(tls13 ? "true" : "false");
+                }
+                else
+                {
+                    proxyStr += ", over-tls=false";
+                }
+            }
+            break;
         default:
             continue;
         }
@@ -1389,7 +1413,7 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
             proxyStr += ", fast-open=" + tfo.get_str();
         if(!udp.is_undef())
             proxyStr += ", udp-relay=" + udp.get_str();
-        if(tlssecure && !scv.is_undef() && (x.Type == ProxyType::HTTP || x.Type == ProxyType::Trojan))
+        if(tlssecure && !scv.is_undef() && (x.Type != ProxyType::Shadowsocks && x.Type != ProxyType::ShadowsocksR))
             proxyStr += ", tls-verification=" + scv.reverse().get_str();
         proxyStr += ", tag=" + remark;
 
@@ -1402,17 +1426,13 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
         return;
 
     string_multimap original_groups;
-    string_array filtered_nodelist;
     ini.SetCurrentSection("policy");
     ini.GetItems(original_groups);
     ini.EraseSection();
 
-    std::string singlegroup;
-    std::string proxies;
-    string_array vArray;
     for(const ProxyGroupConfig &x : extra_proxy_group)
     {
-        eraseElements(filtered_nodelist);
+        string_array filtered_nodelist;
 
         switch(x.Type)
         {
@@ -1460,7 +1480,7 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
         });
         if(iter != original_groups.end())
         {
-            vArray = split(iter->second, ",");
+            string_array vArray = split(iter->second, ",");
             if(vArray.size() > 1)
             {
                 if(trim(vArray[vArray.size() - 1]).find("img-url") == 0)
@@ -1468,70 +1488,14 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
             }
         }
 
-        proxies = join(filtered_nodelist, ", ");
+        std::string proxies = join(filtered_nodelist, ", ");
 
-        singlegroup = type + "=" + x.Name + ", " + proxies;
+        std::string singlegroup = type + "=" + x.Name + ", " + proxies;
         ini.Set("{NONAME}", singlegroup);
     }
 
     if(ext.enable_rule_generator)
         rulesetToSurge(ini, ruleset_content_array, -1, ext.overwrite_original_rules, ext.managed_config_prefix);
-
-    //process scripts
-    string_multimap scripts;
-    std::string content, title, url;
-    const std::string pattern = "^(.*? url script-.*? )(.*?)$";
-    if(ini.SectionExist("rewrite_local") && !ext.quanx_dev_id.empty())
-    {
-        ini.GetItems("rewrite_local", scripts);
-        ini.EraseSection("rewrite_local");
-        ini.SetCurrentSection("rewrite_local");
-        for(auto &x : scripts)
-        {
-            title = x.first;
-            if(title != "{NONAME}")
-                content = title + "=" + x.second;
-            else
-                content = x.second;
-
-            if(regMatch(content, pattern))
-            {
-                url = regReplace(content, pattern, "$2");
-                if(isLink(url))
-                {
-                    url = ext.managed_config_prefix + "/qx-script?id=" + ext.quanx_dev_id + "&url=" + urlSafeBase64Encode(url);
-                    content = regReplace(content, pattern, "$1") + url;
-                }
-            }
-            ini.Set("{NONAME}", content);
-        }
-    }
-    eraseElements(scripts);
-    string_size pos;
-    if(ini.SectionExist("rewrite_remote") && !ext.quanx_dev_id.empty())
-    {
-        ini.GetItems("rewrite_remote", scripts);
-        ini.EraseSection("rewrite_remote");
-        ini.SetCurrentSection("rewrite_remote");
-        for(auto &x : scripts)
-        {
-            title = x.first;
-            if(title != "{NONAME}")
-                content = title + "=" + x.second;
-            else
-                content = x.second;
-
-            if(isLink(content))
-            {
-                pos = content.find(",");
-                url = ext.managed_config_prefix + "/qx-rewrite?id=" + ext.quanx_dev_id + "&url=" + urlSafeBase64Encode(content.substr(0, pos));
-                if(pos != content.npos)
-                    url += content.substr(pos);
-                content = url;
-            }
-            ini.Set("{NONAME}", content);
-        }
-    }
 }
 
 std::string proxyToSSD(std::vector<Proxy> &nodes, std::string &group, std::string &userinfo, extra_settings &ext)
